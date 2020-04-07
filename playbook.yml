@@ -1,0 +1,455 @@
+---
+- hosts: all
+  become: yes
+  become_method: sudo
+  tasks:
+  - name: /etc/resolv.conf
+    copy:
+      dest: /etc/resolv.conf
+      content: nameserver 9.9.9.9
+- hosts: icinga-helper
+  become: yes
+  become_method: sudo
+  tasks:
+  - name: apt update
+    apt:
+      update_cache: yes
+  - name: squid-deb-proxy
+    apt:
+      name: squid-deb-proxy
+  - name: nginx
+    apt:
+      name: nginx
+  - name: Stop squid
+    service:
+      name: squid
+      state: stopped
+      enabled: no
+  - name: /etc/squid-deb-proxy/allowed-networks-src.acl.d/99-*
+    with_inventory_hostnames: all
+    copy:
+      dest: '/etc/squid-deb-proxy/allowed-networks-src.acl.d/99-{{ item }}'
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        {{ hostvars[item].ansible_all_ipv4_addresses[0] }}/32
+    notify: Restart squid-deb-proxy
+  - name: /etc/squid-deb-proxy/mirror-dstdomain.acl.d/99-*
+    loop:
+    - download.docker.com
+    copy:
+      dest: '/etc/squid-deb-proxy/mirror-dstdomain.acl.d/99-{{ item }}'
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        {{ item }}
+    notify: Restart squid-deb-proxy
+  - name: /etc/nginx/default.allow.d
+    file:
+      path: /etc/nginx/default.allow.d
+      owner: root
+      group: root
+      mode: '0755'
+      state: directory
+  - name: /etc/nginx/sites-available/default
+    copy:
+      dest: /etc/nginx/sites-available/default
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        server {
+          listen 80 default_server;
+          server_name _;
+          root /var/www/html;
+          include /etc/nginx/default.allow.d/*.conf;
+          deny all;
+        }
+    notify: Restart nginx
+  - name: /etc/nginx/default.allow.d/*.conf
+    with_inventory_hostnames: all
+    copy:
+      dest: '/etc/nginx/default.allow.d/{{ item }}.conf'
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        allow {{ hostvars[item].ansible_all_ipv4_addresses[0] }};
+    notify: Restart nginx
+  handlers:
+  - name: Restart squid-deb-proxy
+    service:
+      name: squid-deb-proxy
+      state: restarted
+  - name: Restart nginx
+    service:
+      name: nginx
+      state: restarted
+- hosts: icinga-helper
+  become: yes
+  become_method: sudo
+  tasks:
+  - name: Icinga 2 packages
+    loop:
+    - common
+    - bin
+    - dbg
+    copy:
+      dest: '/var/www/html/icinga2-{{ item }}.deb'
+      mode: '0644'
+      src: 'icinga2-{{ item }}.deb'
+- hosts: all
+  become: yes
+  become_method: sudo
+  tasks:
+  - name: /etc/apt/apt.conf.d/01proxy
+    copy:
+      dest: /etc/apt/apt.conf.d/01proxy
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        Acquire::http { Proxy "http://{{ hostvars['icinga-helper'].ansible_all_ipv4_addresses[0] }}:8000"; };
+- hosts: icingas
+  become: yes
+  become_method: sudo
+  tasks:
+  - name: apt update
+    apt:
+      update_cache: yes
+  - name: Icinga 2 dependencies
+    loop:
+    - gdb
+    - haveged
+    - libboost-atomic1.67.0
+    - libboost-chrono1.67.0
+    - libboost-context1.67.0
+    - libboost-coroutine1.67.0
+    - libboost-date-time1.67.0
+    - libboost-filesystem1.67.0
+    - libboost-program-options1.67.0
+    - libboost-regex1.67.0
+    - libboost-thread1.67.0
+    - libyajl2
+    - monitoring-plugins
+    - screen
+    apt:
+      name: '{{ item }}'
+  - name: Icinga 2 packages
+    loop:
+    - common
+    - bin
+    - dbg
+    get_url:
+      dest: '/icinga2-{{ item }}.deb'
+      mode: '0644'
+      url: >-
+        http://{{ hostvars['icinga-helper'].ansible_all_ipv4_addresses[0] }}/icinga2-{{ item }}.deb
+    register: i2debs
+  - name: 'dpkg -i /icinga2-*.deb'
+    when: 'i2debs.results[0].changed or i2debs.results[1].changed'
+    shell: 'dpkg -i /icinga2-*.deb'
+    notify: Restart Icinga 2
+  - name: /etc/default/icinga2
+    copy:
+      dest: /etc/default/icinga2
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        ICINGA2_RLIMIT_FILES=1000000
+    notify: Restart Icinga 2
+  - name: /etc/systemd/system/icinga2.service.d/override.conf
+    copy:
+      dest: /etc/systemd/system/icinga2.service.d/override.conf
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        [Service]
+        LimitCORE=infinity
+    notify: Restart Icinga 2
+  - name: /var/lib/cores
+    file:
+      path: /var/lib/cores
+      owner: root
+      group: root
+      mode: '01777'
+      state: directory
+  - name: kernel.core_pattern
+    sysctl:
+      name: kernel.core_pattern
+      value: /var/lib/cores/core.%e.%p
+  - name: fs.suid_dumpable
+    sysctl:
+      name: fs.suid_dumpable
+      value: 2
+  - name: Reload systemd
+    systemd:
+      daemon_reload: yes
+  handlers:
+  - name: Restart Icinga 2
+    service:
+      name: icinga2
+      state: restarted
+- hosts: icinga-master-1
+  become: yes
+  become_method: sudo
+  tasks:
+  - name: icinga2 node setup
+    shell: >
+      icinga2 node setup
+      --zone master
+      --listen 0.0.0.0,5665
+      --cn {{ inventory_hostname }}
+      --master
+      --disable-confd;
+      rm -f /var/cache/icinga2/icinga2.vars
+    args:
+      creates: /var/lib/icinga2/certs/ca.crt
+    notify: Restart Icinga 2
+  - name: /var/cache/icinga2/icinga2.vars
+    shell: icinga2 daemon -C
+    args:
+      creates: /var/cache/icinga2/icinga2.vars
+  - name: Icinga 2 ticket
+    with_inventory_hostnames:
+    - 'icingas:!{{ inventory_hostname }}'
+    shell: >
+      icinga2 pki ticket --cn {{ item }}
+      >/var/cache/icinga2/{{ item }}.ticket
+    args:
+      creates: '/var/cache/icinga2/{{ item }}.ticket'
+  - name: Fetch Icinga 2 ticket
+    with_inventory_hostnames:
+    - 'icingas:!{{ inventory_hostname }}'
+    fetch:
+      dest: .tempfiles
+      src: '/var/cache/icinga2/{{ item }}.ticket'
+  - name: Fetch Icinga 2 CA cert
+    fetch:
+      dest: .tempfiles
+      src: /var/lib/icinga2/certs/ca.crt
+  handlers:
+  - name: Restart Icinga 2
+    service:
+      name: icinga2
+      state: restarted
+- hosts: 'icingas:!icinga-master-1'
+  become: yes
+  become_method: sudo
+  tasks:
+  - name: /var/cache/icinga2/my.ticket
+    copy:
+      dest: /var/cache/icinga2/my.ticket
+      owner: nagios
+      group: nagios
+      mode: '0600'
+      src: '.tempfiles/icinga-master-1/var/cache/icinga2/{{ inventory_hostname }}.ticket'
+  - name: icinga2 node setup
+    shell: >
+      icinga2 node setup
+      --zone {{ inventory_hostname }}
+      --endpoint icinga-master-1,{{ hostvars['icinga-master-1'].ansible_all_ipv4_addresses[0] }},5665
+      --parent_zone master
+      --listen 0.0.0.0,5665
+      --ticket `cat /var/cache/icinga2/my.ticket`
+      --cn {{ inventory_hostname }}
+      --accept-config
+      --accept-commands
+      --disable-confd
+    args:
+      creates: /var/lib/icinga2/certs
+    notify: Restart Icinga 2
+  - name: /var/lib/icinga2/certs/ca.crt
+    copy:
+      dest: /var/lib/icinga2/certs/ca.crt
+      owner: nagios
+      group: nagios
+      mode: '0644'
+      src: .tempfiles/icinga-master-1/var/lib/icinga2/certs/ca.crt
+  handlers:
+  - name: Restart Icinga 2
+    service:
+      name: icinga2
+      state: restarted
+- hosts: 'icingas:!icinga-master-1'
+  become: yes
+  become_method: sudo
+  tasks:
+  - name: Wait for signing
+    shell: |
+      while ! openssl x509 -in /var/lib/icinga2/certs/{{ inventory_hostname }}.crt -noout -text |grep -qFwe 'Issuer: CN = Icinga CA'; do sleep 1; done
+- hosts: icingas
+  become: yes
+  become_method: sudo
+  tasks:
+  - name: /etc/icinga2/zones.conf.d
+    file:
+      path: /etc/icinga2/zones.conf.d
+      owner: root
+      group: root
+      mode: '0755'
+      state: directory
+  - name: Icinga 2 endpoints config
+    with_inventory_hostnames: icingas
+    copy:
+      dest: '/etc/icinga2/zones.conf.d/{{ item }}.conf'
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        object Endpoint "{{ item }}" {
+          host = "{{ hostvars[item].ansible_all_ipv4_addresses[0] }}"
+        }
+    notify: Restart Icinga 2
+  - name: /etc/icinga2/zones.conf.d/zones.conf
+    copy:
+      dest: /etc/icinga2/zones.conf.d/zones.conf
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        object Zone "icinga-master" {
+          endpoints = [ "icinga-master-1", "icinga-master-2" ]
+        }
+        object Zone "icinga-sat-orange" {
+          endpoints = [ "icinga-sat-orange-1", "icinga-sat-orange-2" ]
+          parent = "icinga-master"
+        }
+        object Zone "icinga-sat-apple" {
+          endpoints = [ "icinga-sat-apple-1", "icinga-sat-apple-2" ]
+          parent = "icinga-master"
+        }
+        object Zone "icinga-sat-boskoop" {
+          endpoints = [ "icinga-sat-boskoop-1", "icinga-sat-boskoop-2" ]
+          parent = "icinga-sat-apple"
+        }
+        object Zone "global" {
+          global = true
+        }
+    notify: Restart Icinga 2
+  - name: /etc/icinga2/zones.conf.d/agents.conf
+    copy:
+      dest: /etc/icinga2/zones.conf.d/agents.conf
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        for (head in ["master", "sat-orange", "sat-apple", "sat-boskoop"]) {
+          for (i in range(500)) {
+            var prnt = "icinga-" + head
+            var agent = prnt + "-agent-" + (i + 1)
+            object Endpoint agent {
+            }
+            object Zone agent use (agent, prnt) {
+              endpoints = [ agent ]
+              parent = prnt
+            }
+          }
+        }
+    notify: Restart Icinga 2
+  - name: /etc/icinga2/zones.conf
+    copy:
+      dest: /etc/icinga2/zones.conf
+      content: 'include "zones.conf.d/*.conf"'
+    notify: Restart Icinga 2
+  handlers:
+  - name: Restart Icinga 2
+    service:
+      name: icinga2
+      state: restarted
+- hosts: icinga-master-1
+  become: yes
+  become_method: sudo
+  tasks:
+  - shell: |
+      for head in master sat-{orange,apple,boskoop}; do
+        for i in {1..500}; do
+          agent="icinga-${head}-agent-$i"
+          mkdir /etc/icinga2/zones.d/$agent
+          cat <<EOF >/etc/icinga2/zones.d/${agent}/localhost.conf
+      object Host "${agent}" {
+        check_command = "passive"
+        enable_active_checks = false
+      }
+      EOF
+        done
+        zone="icinga-${head}"
+        mkdir /etc/icinga2/zones.d/$zone
+        for i in {1..2}; do
+          node="${zone}-$i"
+          cat <<EOF >/etc/icinga2/zones.d/${zone}/localhost.conf
+      object Host "${node}" {
+        check_command = "passive"
+        enable_active_checks = false
+      }
+      EOF
+        done
+      done
+    args:
+      executable: /bin/bash
+  - name: Icinga 2 config dir
+    loop:
+    - global
+    file:
+      path: '/etc/icinga2/zones.d/{{ item }}'
+      owner: root
+      group: root
+      mode: '0755'
+      state: directory
+  - name: /etc/icinga2/zones.d/global/global.conf
+    copy:
+      dest: /etc/icinga2/zones.d/global/global.conf
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        object User "navalny" {
+        }
+        object NotificationCommand "stabilnost" {
+          command = [ "/bin/true" ]
+        }
+        for (i in range(40)) {
+          apply Service i {
+            check_command = "dummy"
+            command_endpoint = host.name
+            check_interval = 5m
+            max_check_attempts = 1
+            var that = this
+            vars.dummy_state = function() use(that) {
+              return if (that.last_check_result && that.last_check_result.state) { 0 } else { 2 }
+            }
+            assign where true
+          }
+        }
+        apply Notification "stabilnost" to Service {
+          command = "stabilnost"
+          users = [ "navalny" ]
+          assign where true
+        }
+        object CheckCommand "linux_netdev" {
+          command = [ PluginDir + "/check_linux_netdev" ]
+        }
+        apply Service "linux_netdev" {
+          check_command = "linux_netdev"
+          check_interval = 1s
+          command_endpoint = host.name
+          assign where !match("*agent*", host.name)
+        }
+    notify: Restart Icinga 2
+  handlers:
+  - name: Restart Icinga 2
+    service:
+      name: icinga2
+      state: restarted
+- hosts: icingas
+  become: yes
+  become_method: sudo
+  tasks:
+  - get_url:
+      dest: /usr/lib/nagios/plugins/check_linux_netdev
+      mode: '0755'
+      url: https://github.com/Al2Klimov/check_linux_netdev/releases/download/v0.1-1/check_linux_netdev.linux-amd64
