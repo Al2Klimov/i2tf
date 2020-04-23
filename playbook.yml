@@ -2,15 +2,16 @@
 - hosts: all
   become: yes
   become_method: sudo
-  tasks:
-  - name: /etc/resolv.conf
-    copy:
-      dest: /etc/resolv.conf
-      content: nameserver 9.9.9.9
+  tasks: []
 - hosts: icinga-helper
   become: yes
   become_method: sudo
   tasks:
+  - name: /etc/resolv.conf
+    copy:
+      dest: /etc/resolv.conf
+      content: |
+        nameserver 9.9.9.9
   - name: apt update
     apt:
       update_cache: yes
@@ -20,6 +21,9 @@
   - name: nginx
     apt:
       name: nginx
+  - name: dnsmasq
+    apt:
+      name: dnsmasq
   - name: Stop squid
     service:
       name: squid
@@ -78,6 +82,24 @@
       content: |
         allow {{ hostvars[item].ansible_all_ipv4_addresses[0] }};
     notify: Restart nginx
+  - name: /etc/dnsmasq.conf
+    blockinfile:
+      path: /etc/dnsmasq.conf
+      marker: '# {mark} general'
+      block: |
+        no-resolv
+        no-hosts
+        interface=eth0
+        server=9.9.9.9
+    notify: Restart dnsmasq
+  - name: /etc/dnsmasq.conf
+    with_inventory_hostnames: all
+    blockinfile:
+      path: /etc/dnsmasq.conf
+      marker: '# {mark} {{ item }}'
+      block: |
+        address=/{{ item }}/{{ hostvars[item].ansible_all_ipv4_addresses[0] }}
+    notify: Restart dnsmasq
   handlers:
   - name: Restart squid-deb-proxy
     service:
@@ -87,6 +109,19 @@
     service:
       name: nginx
       state: restarted
+  - name: Restart dnsmasq
+    service:
+      name: dnsmasq
+      state: restarted
+- hosts: icingas
+  become: yes
+  become_method: sudo
+  tasks:
+  - name: /etc/resolv.conf
+    copy:
+      dest: /etc/resolv.conf
+      content: |
+        nameserver {{ hostvars['icinga-helper'].ansible_all_ipv4_addresses[0] }}
 - hosts: icinga-helper
   become: yes
   become_method: sudo
