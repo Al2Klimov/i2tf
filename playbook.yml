@@ -36,6 +36,9 @@
   - name: docker-ce
     apt:
       name: docker-ce
+  - name: python-docker
+    apt:
+      name: python-docker
   - name: Stop squid
     service:
       name: squid
@@ -307,6 +310,10 @@
     fetch:
       dest: .tempfiles
       src: /var/lib/icinga2/certs/ca.crt
+  - name: Fetch Icinga 2 CA key
+    fetch:
+      dest: .tempfiles
+      src: /var/lib/icinga2/ca/ca.key
   handlers:
   - name: Restart Icinga 2
     service:
@@ -528,3 +535,199 @@
       dest: /usr/lib/nagios/plugins/check_linux_netdev
       mode: '0755'
       url: https://github.com/Al2Klimov/check_linux_netdev/releases/download/v0.1-1/check_linux_netdev.linux-amd64
+- hosts: icinga-helper
+  become: yes
+  become_method: sudo
+  tasks:
+  - name: /usr/local/docker-icinga/...
+    loop:
+    - ''
+    - /ca
+    - /zones.conf.d
+    file:
+      path: '/usr/local/docker-icinga{{ item }}'
+      owner: root
+      group: root
+      mode: '0755'
+      state: directory
+  - name: /usr/local/docker-icinga/repos.list
+    copy:
+      dest: /usr/local/docker-icinga/repos.list
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        deb http://deb.debian.org/debian buster-backports main
+    register: icinga_repos
+  - name: Untag icinga-helper:5000/icinga2
+    when: icinga_repos.changed
+    docker_image:
+      name: localhost:5000/icinga2
+      state: absent
+  - name: /usr/local/docker-icinga/*.deb
+    loop:
+    - common
+    - bin
+    file:
+      path: '/usr/local/docker-icinga/icinga2-{{ item }}.deb'
+      state: hard
+      force: yes
+      src: '/var/www/html/icinga2-{{ item }}.deb'
+    register: icinga_packages
+  - name: Untag icinga-helper:5000/icinga2
+    loop: '{{ icinga_packages.results }}'
+    when: item.changed
+    docker_image:
+      name: localhost:5000/icinga2
+      state: absent
+  - name: Icinga 2 endpoints config
+    with_inventory_hostnames: icingas
+    copy:
+      dest: '/usr/local/docker-icinga/zones.conf.d/{{ item }}.conf'
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        object Endpoint "{{ item }}" {
+          host = "{{ hostvars[item].ansible_default_ipv4.address }}"
+        }
+    register: icinga_endpoints
+  - name: Untag icinga-helper:5000/icinga2
+    loop: '{{ icinga_endpoints.results }}'
+    when: item.changed
+    docker_image:
+      name: localhost:5000/icinga2
+      state: absent
+  - name: Icinga 2 zones config
+    copy:
+      dest: /usr/local/docker-icinga/zones.conf
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        include "/etc/icinga2/zones.conf.d/*.conf"
+        object Zone "icinga-master" {
+          endpoints = [ "icinga-master-1", "icinga-master-2" ]
+        }
+        object Zone "icinga-sat-orange" {
+          endpoints = [ "icinga-sat-orange-1", "icinga-sat-orange-2" ]
+          parent = "icinga-master"
+        }
+        object Zone "icinga-sat-apple" {
+          endpoints = [ "icinga-sat-apple-1", "icinga-sat-apple-2" ]
+          parent = "icinga-master"
+        }
+        object Zone "icinga-sat-boskoop" {
+          endpoints = [ "icinga-sat-boskoop-1", "icinga-sat-boskoop-2" ]
+          parent = "icinga-sat-apple"
+        }
+        object Zone "global" {
+          global = true
+        }
+        for (head in ["master", "sat-orange", "sat-apple", "sat-boskoop"]) {
+          for (i in range(500)) {
+            var prnt = "icinga-" + head
+            var agent = prnt + "-agent-" + (i + 1)
+            object Endpoint agent {
+            }
+            object Zone agent use (agent, prnt) {
+              endpoints = [ agent ]
+              parent = prnt
+            }
+          }
+        }
+    register: icinga_zones
+  - name: Untag icinga-helper:5000/icinga2
+    when: icinga_zones.changed
+    docker_image:
+      name: localhost:5000/icinga2
+      state: absent
+  - name: /usr/local/docker-icinga/ca.*
+    loop:
+    - ext: crt
+      src: certs
+    - ext: key
+      src: ca
+    copy:
+      dest: '/usr/local/docker-icinga/ca/ca.{{ item.ext }}'
+      owner: root
+      group: root
+      mode: '0644'
+      src: '.tempfiles/icinga-master-1/var/lib/icinga2/{{ item.src }}/ca.{{ item.ext }}'
+    register: icinga_ca
+  - name: Untag icinga-helper:5000/icinga2
+    loop: '{{ icinga_ca.results }}'
+    when: item.changed
+    docker_image:
+      name: localhost:5000/icinga2
+      state: absent
+  - name: /usr/local/docker-icinga/start.sh
+    copy:
+      dest: /usr/local/docker-icinga/start.sh
+      owner: root
+      group: root
+      mode: '0755'
+      content: |
+        #!/bin/bash
+        set -e
+        icinga2 pki new-cert \
+          --cn $(hostname) \
+          --csr /var/lib/icinga2/certs/$(hostname).csr \
+          --cert /var/lib/icinga2/certs/$(hostname).crt \
+          --key /var/lib/icinga2/certs/$(hostname).key
+        icinga2 pki sign-csr \
+          --csr /var/lib/icinga2/certs/$(hostname).csr \
+          --cert /var/lib/icinga2/certs/$(hostname).crt
+        exec icinga2 daemon -x notice
+    register: icinga_start
+  - name: Untag icinga-helper:5000/icinga2
+    when: icinga_start.changed
+    docker_image:
+      name: localhost:5000/icinga2
+      state: absent
+  - name: /usr/local/docker-icinga/Dockerfile
+    copy:
+      dest: /usr/local/docker-icinga/Dockerfile
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        FROM debian:{{ ansible_lsb.codename }}-slim
+        SHELL ["/bin/bash", "-exo", "pipefail", "-c"]
+        COPY repos.list /etc/apt/sources.list.d/repos.list
+        COPY icinga2-common.deb icinga2-bin.deb /
+        RUN dpkg -i *.deb || true ;\
+          apt-get update ;\
+          DEBIAN_FRONTEND=noninteractive apt-get install --no-install-{recommends,suggests} -y -f ;\
+          apt-get clean ;\
+          rm -vrf /var/lib/apt/lists/*
+        COPY zones.conf /etc/icinga2/zones.conf
+        COPY zones.conf.d /etc/icinga2/zones.conf.d
+        RUN rm -rf /etc/icinga2/conf.d/*
+        RUN /usr/lib/icinga2/prepare-dirs /etc/default/icinga2
+        RUN mkdir /var/lib/icinga2/certs ;\
+          chown nagios. /var/lib/icinga2/certs
+        RUN icinga2 feature enable api
+        RUN sed -i "/accept_commands/c\accept_commands = true" /etc/icinga2/features-enabled/api.conf
+        RUN sed -i "/accept_config/c\accept_config = true" /etc/icinga2/features-enabled/api.conf
+        RUN icinga2 feature disable checker
+        RUN icinga2 feature disable mainlog
+        RUN icinga2 feature disable notification
+        COPY ca /var/lib/icinga2/ca
+        RUN chown -R nagios. /var/lib/icinga2/ca
+        COPY ca/ca.crt /var/lib/icinga2/certs
+        COPY start.sh /start.sh
+        CMD ["/start.sh"]
+    register: icinga_dockerfile
+  - name: Untag icinga-helper:5000/icinga2
+    when: icinga_dockerfile.changed
+    docker_image:
+      name: localhost:5000/icinga2
+      state: absent
+  - name: Build icinga-helper:5000/icinga2
+    docker_image:
+      name: localhost:5000/icinga2
+      source: build
+      build:
+        path: /usr/local/docker-icinga
+      push: yes
