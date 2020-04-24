@@ -12,15 +12,6 @@
       dest: /etc/resolv.conf
       content: |
         nameserver 9.9.9.9
-  - name: Docker apt key
-    apt_key:
-      url: https://download.docker.com/linux/debian/gpg
-  - name: Docker repo
-    apt_repository:
-      filename: docker
-      repo: >
-        deb [arch=amd64] https://download.docker.com/linux/debian
-        {{ ansible_lsb.codename }} stable
   - name: apt update
     apt:
       update_cache: yes
@@ -33,12 +24,6 @@
   - name: dnsmasq
     apt:
       name: dnsmasq
-  - name: docker-ce
-    apt:
-      name: docker-ce
-  - name: python-docker
-    apt:
-      name: python-docker
   - name: Stop squid
     service:
       name: squid
@@ -115,6 +100,88 @@
       block: |
         address=/{{ item }}/{{ hostvars[item].ansible_default_ipv4.address }}
     notify: Restart dnsmasq
+  handlers:
+  - name: Restart squid-deb-proxy
+    service:
+      name: squid-deb-proxy
+      state: restarted
+  - name: Restart nginx
+    service:
+      name: nginx
+      state: restarted
+  - name: Restart dnsmasq
+    service:
+      name: dnsmasq
+      state: restarted
+- hosts: 'all:!icinga-helper'
+  become: yes
+  become_method: sudo
+  tasks:
+  - name: /etc/resolv.conf
+    copy:
+      dest: /etc/resolv.conf
+      content: |
+        nameserver {{ hostvars['icinga-helper'].ansible_default_ipv4.address }}
+- hosts: all
+  become: yes
+  become_method: sudo
+  tasks:
+  - name: /etc/apt/apt.conf.d/01proxy
+    copy:
+      dest: /etc/apt/apt.conf.d/01proxy
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        Acquire::http { Proxy "http://{{ hostvars['icinga-helper'].ansible_default_ipv4.address }}:8000"; };
+- hosts: icinga-helper:agents
+  become: yes
+  become_method: sudo
+  tasks:
+  - name: apt update
+    apt:
+      update_cache: yes
+  - name: gpg
+    apt:
+      name: gpg
+  - name: Docker apt key
+    apt_key:
+      url: https://download.docker.com/linux/debian/gpg
+  - name: Docker repo
+    apt_repository:
+      filename: docker
+      repo: >
+        deb [arch=amd64] https://download.docker.com/linux/debian
+        {{ ansible_lsb.codename }} stable
+  - name: apt update
+    apt:
+      update_cache: yes
+  - name: docker-ce
+    apt:
+      name: docker-ce
+  - name: python-docker
+    apt:
+      name: python-docker
+  - name: /etc/docker/daemon.json
+    copy:
+      dest: /etc/docker/daemon.json
+      owner: root
+      group: root
+      mode: '0644'
+      content: >-
+        {"insecure-registries":["{{
+          hostvars['icinga-helper'].ansible_default_ipv4.address
+        }}:5000"]}
+    notify: Restart docker
+  handlers:
+  - name: Restart docker
+    service:
+      name: docker
+      state: restarted
+- hosts: icinga-helper
+  become: yes
+  become_method: sudo
+  tasks:
   - name: /etc/systemd/system/docker-registry.service
     copy:
       dest: /etc/systemd/system/docker-registry.service
@@ -143,28 +210,6 @@
       name: docker-registry
       state: started
       enabled: yes
-  handlers:
-  - name: Restart squid-deb-proxy
-    service:
-      name: squid-deb-proxy
-      state: restarted
-  - name: Restart nginx
-    service:
-      name: nginx
-      state: restarted
-  - name: Restart dnsmasq
-    service:
-      name: dnsmasq
-      state: restarted
-- hosts: icingas
-  become: yes
-  become_method: sudo
-  tasks:
-  - name: /etc/resolv.conf
-    copy:
-      dest: /etc/resolv.conf
-      content: |
-        nameserver {{ hostvars['icinga-helper'].ansible_default_ipv4.address }}
 - hosts: icinga-helper
   become: yes
   become_method: sudo
@@ -178,18 +223,6 @@
       dest: '/var/www/html/icinga2-{{ item }}.deb'
       mode: '0644'
       src: 'icinga2-{{ item }}.deb'
-- hosts: all
-  become: yes
-  become_method: sudo
-  tasks:
-  - name: /etc/apt/apt.conf.d/01proxy
-    copy:
-      dest: /etc/apt/apt.conf.d/01proxy
-      owner: root
-      group: root
-      mode: '0644'
-      content: |
-        Acquire::http { Proxy "http://{{ hostvars['icinga-helper'].ansible_default_ipv4.address }}:8000"; };
 - hosts: icingas
   become: yes
   become_method: sudo
@@ -731,3 +764,54 @@
       build:
         path: /usr/local/docker-icinga
       push: yes
+- hosts: agents
+  become: yes
+  become_method: sudo
+  tasks:
+  - name: Pull icinga-helper:5000/icinga2
+    docker_image:
+      name: >-
+        {{ hostvars['icinga-helper'].ansible_default_ipv4.address }}:5000/icinga2
+      source: pull
+    register: icinga_image
+  - name: /etc/systemd/system/docker-agent-*.service
+    loop: '{{ range(1, 501, 1)|list }}'
+    copy:
+      dest: '/etc/systemd/system/docker-agent-{{ item }}.service'
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        [Unit]
+        After=docker.service
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=docker run --rm -d --name agent{{ item }} -h {{
+          inventory_hostname |regex_replace('-agents', '')
+        }}-agent-{{ item }} --cpuset-cpus={{ item % 12 }} {{
+          hostvars['icinga-helper'].ansible_default_ipv4.address
+        }}:5000/icinga2
+        ExecStop=docker stop agent{{ item }}
+    register: docker_agent_service
+  - name: Reload systemd
+    systemd:
+      daemon_reload: yes
+  - name: Stop agents
+    loop: '{{ docker_agent_service.results }}'
+    when: icinga_image.changed
+    service:
+      name: 'docker-agent-{{ item.item }}'
+      state: stopped
+  - name: Stop agents
+    loop: '{{ docker_agent_service.results }}'
+    when: item.changed
+    service:
+      name: 'docker-agent-{{ item.item }}'
+      state: stopped
+  - name: Start agents
+    loop: '{{ docker_agent_service.results }}'
+    service:
+      name: 'docker-agent-{{ item.item }}'
+      state: started
+      enabled: yes
