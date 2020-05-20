@@ -527,7 +527,7 @@
         object NotificationCommand "stabilnost" {
           command = [ "/bin/true" ]
         }
-        for (i in range(40)) {
+        for (i in range(500)) {
           apply Service i {
             check_command = "dummy"
             command_endpoint = host.name
@@ -537,7 +537,20 @@
             vars.dummy_state = function() use(that) {
               return if (that.last_check_result && that.last_check_result.state) { 0 } else { 2 }
             }
-            assign where true
+            assign where !match("*agent*", host.name)
+          }
+        }
+        for (i in range(1)) {
+          apply Service i {
+            check_command = "dummy"
+            command_endpoint = host.name
+            check_interval = 5m
+            max_check_attempts = 1
+            var that = this
+            vars.dummy_state = function() use(that) {
+              return if (that.last_check_result && that.last_check_result.state) { 0 } else { 2 }
+            }
+            assign where match("*agent*", host.name)
           }
         }
         apply Notification "stabilnost" to Service {
