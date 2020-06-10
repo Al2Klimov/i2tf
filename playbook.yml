@@ -42,6 +42,7 @@
   - name: /etc/squid-deb-proxy/mirror-dstdomain.acl.d/99-*
     loop:
     - download.docker.com
+    - packages.icinga.com
     copy:
       dest: '/etc/squid-deb-proxy/mirror-dstdomain.acl.d/99-{{ item }}'
       owner: root
