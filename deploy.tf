@@ -7,7 +7,7 @@ resource "openstack_compute_instance_v2" "icinga-helper" {
 		source_type = "image"
 		boot_index = 0
 		destination_type = "volume"
-		volume_size = 75
+		volume_size = 150
 		delete_on_termination = true
 	}
 	network {
@@ -27,7 +27,7 @@ resource "openstack_compute_instance_v2" "icinga-master" {
 		source_type = "image"
 		boot_index = 0
 		destination_type = "volume"
-		volume_size = 75
+		volume_size = 150
 		delete_on_termination = true
 	}
 	network {
@@ -47,7 +47,7 @@ resource "openstack_compute_instance_v2" "icinga-sat-orange" {
 		source_type = "image"
 		boot_index = 0
 		destination_type = "volume"
-		volume_size = 75
+		volume_size = 150
 		delete_on_termination = true
 	}
 	network {
@@ -67,7 +67,7 @@ resource "openstack_compute_instance_v2" "icinga-sat-apple" {
 		source_type = "image"
 		boot_index = 0
 		destination_type = "volume"
-		volume_size = 75
+		volume_size = 150
 		delete_on_termination = true
 	}
 	network {
@@ -87,7 +87,7 @@ resource "openstack_compute_instance_v2" "icinga-sat-boskoop" {
 		source_type = "image"
 		boot_index = 0
 		destination_type = "volume"
-		volume_size = 75
+		volume_size = 150
 		delete_on_termination = true
 	}
 	network {
@@ -106,7 +106,7 @@ resource "openstack_compute_instance_v2" "icinga-agents-master" {
 		source_type = "image"
 		boot_index = 0
 		destination_type = "volume"
-		volume_size = 75
+		volume_size = 150
 		delete_on_termination = true
 	}
 	network {
@@ -125,7 +125,7 @@ resource "openstack_compute_instance_v2" "icinga-agents-sat-orange" {
 		source_type = "image"
 		boot_index = 0
 		destination_type = "volume"
-		volume_size = 75
+		volume_size = 150
 		delete_on_termination = true
 	}
 	network {
@@ -144,7 +144,7 @@ resource "openstack_compute_instance_v2" "icinga-agents-sat-apple" {
 		source_type = "image"
 		boot_index = 0
 		destination_type = "volume"
-		volume_size = 75
+		volume_size = 150
 		delete_on_termination = true
 	}
 	network {
@@ -163,7 +163,7 @@ resource "openstack_compute_instance_v2" "icinga-agents-sat-boskoop" {
 		source_type = "image"
 		boot_index = 0
 		destination_type = "volume"
-		volume_size = 75
+		volume_size = 150
 		delete_on_termination = true
 	}
 	network {
